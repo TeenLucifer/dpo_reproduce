@@ -1,4 +1,3 @@
-import json
 from transformers import TrainingArguments, Trainer, AutoModelForCausalLM, AutoTokenizer
 import torch
 import torch.nn.functional as F
@@ -7,12 +6,12 @@ from datasets import load_dataset
 
 def to_triplet(example):
     return {
-        #"prompt": conversation_to_prompt(example["conversations"]),
         "prompt": (example["conversations"][0].get("value")),
         "chosen": (example["chosen"].get("value") or "").strip(),
         "rejected": (example["rejected"].get("value") or "").strip(),
     }
 
+# DPODataset用于读取单条样本转换为token id序列
 class DPODataset(Dataset):
     def __init__(self, data, tokenizer):
         super().__init__()
@@ -36,32 +35,36 @@ class DPODataset(Dataset):
         rejected_inputs = self.tokenizer(text=rejected)['input_ids'] + [self.tokenizer.eos_token_id]
         chosen_inputs = self.tokenizer(text=chosen)['input_ids'] + [self.tokenizer.eos_token_id]
         return [prompt_inputs, chosen_inputs, rejected_inputs]
-    
+
     def __len__(self):
         return len(self.datas)
 
+# DPODataCollator用于将数据打包为batch的形式
 class DPODataCollator:
     def __init__(self, tokenizer, max_seq_len):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
+
     def __call__(self, features):
         inputs_ids = []
         labels = []
-        
+
+        # features: {prompt_input_ids, chosen_input_ids, rejected_input_ids}
         for feature in features:
             inputs_ids.append(feature[0] + feature[1])
             labels.append([0]*len(feature[0]) + feature[1])
+
         for feature in features:
             inputs_ids.append(feature[0] + feature[2])
             labels.append([0]*len(feature[0]) + feature[2])
-            
+
         def process(inputs_ids, labels):
             inputs_ids = [input_ids[:self.max_seq_len] for input_ids in inputs_ids]
             labels = [label[:self.max_seq_len] for label in labels]
             max_len = max([len(input_ids) for input_ids in inputs_ids])
             batch_input_ids = []
             batch_labels = []
-            
+
             for input_ids, label in zip(inputs_ids, labels):
                 if len(input_ids) <= max_len:
                     input_ids = input_ids+[0]*(max_len-len(input_ids))
@@ -69,12 +72,12 @@ class DPODataCollator:
                     batch_input_ids.append(input_ids[:-1])
                     batch_labels.append(label[1:])
             return batch_input_ids, batch_labels
-        
+
         inputs_ids, labels = process(inputs_ids, labels)
-        
+
         return {
-            "input_ids": torch.tensor(inputs_ids),
-            "labels": torch.tensor(labels)
+                "input_ids": torch.tensor(inputs_ids),
+                "labels": torch.tensor(labels)
             }
 
 def logits_to_probs(logits, labels):
@@ -91,7 +94,7 @@ def mask_logits(logits, labels):
     new_logits = []
     for logit, label in zip(logits, labels):
         new_logits.append(logit[label != 0].sum().unsqueeze(0))
-    
+
     return new_logits
 
 def dpo_loss(ref_probs, probs, beta):
@@ -133,16 +136,16 @@ if __name__ == "__main__":
     ref_model = AutoModelForCausalLM.from_pretrained(model_path).eval().to('cuda')
 
     raw = load_dataset("parquet", data_files=dataset_path)["train"]
-    train_split = raw.train_test_split(test_size=0.99, seed=42)["train"]
+    train_split = raw.train_test_split(test_size=0.9, seed=42)["train"]
     triplet = train_split.map(to_triplet, remove_columns=raw.column_names)
-    dataset = DPODataCollator(triplet, tokenizer)
+    dataset = DPODataset(triplet, tokenizer)
 
-    data_collator = DPODataCollator(tokenizer, max_seq_len=512)
+    data_collator = DPODataCollator(tokenizer, max_seq_len=256)
     args = TrainingArguments(output_dir=output_path,
                             num_train_epochs=1,
                             do_train=True,
-                            per_device_train_batch_size=16,
-                            gradient_accumulation_steps=4,
+                            per_device_train_batch_size=8,
+                            gradient_accumulation_steps=2,
                             logging_steps=50,
                             report_to='tensorboard',
                             save_total_limit=3,
