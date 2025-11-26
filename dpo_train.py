@@ -126,6 +126,7 @@ class DPOTrainer(Trainer):
 if __name__ == "__main__":
     model_path = "./Qwen2.5-0.5B"
     dataset_path = "./COIG-P/data/*.parquet"
+    output_path = "./Qwen2.5-0.5B-DPO"
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
     policy_model = AutoModelForCausalLM.from_pretrained(model_path)
@@ -137,12 +138,11 @@ if __name__ == "__main__":
     dataset = DPODataCollator(triplet, tokenizer)
 
     data_collator = DPODataCollator(tokenizer, max_seq_len=512)
-    args = TrainingArguments(output_dir='./dpo-1-epoch', 
+    args = TrainingArguments(output_dir=output_path,
                             num_train_epochs=1,
-                            do_train=True, 
+                            do_train=True,
                             per_device_train_batch_size=16,
                             gradient_accumulation_steps=4,
-                            # max_steps=15000,
                             logging_steps=50,
                             report_to='tensorboard',
                             save_total_limit=3,
@@ -152,7 +152,7 @@ if __name__ == "__main__":
                             dataloader_num_workers=1,
                             dataloader_pin_memory=True,
                             save_safetensors=False,
-                            save_steps=100)          
+                            save_steps=100)
 
     trainer = DPOTrainer(
         model=policy_model,
@@ -164,5 +164,5 @@ if __name__ == "__main__":
 
     # 如果是初次训练resume_from_checkpoint为false，接着checkpoint继续训练，为True
     trainer.train(resume_from_checkpoint=False)
-    trainer.save_model('./Qwen2.5-0.5B-DPO')
+    trainer.save_model()
     trainer.save_state()
