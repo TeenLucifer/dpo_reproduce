@@ -3,7 +3,7 @@
 本项目基于 Qwen2.5-0.5B 语言模型全流程复现DPO算法，loss函数设计+policy model训练。
 
 ## 🎯 项目概述
-TODO(wangjintao): 项目概述
+复现 DPO（Direct Preference Optimization）训练流程：以 Qwen2.5-0.5B 为基座，使用 COIG-P 偏好数据构造 prompt-chosen-rejected 三元组，通过自定义 DataCollator 与 DPO 损失在单卡上完成参考模型与策略模型对比训练。目标是用更低成本替代 RLHF 中的奖励模型环节，直接对齐人类偏好。
 
 ## 🔍 算法原理
 DPO算法的解决的问题可以看示意图，就是把RLHF中参考reward model给去掉了，节省了reward model训练的开销，本质上来说DPO属于监督微调。
@@ -12,7 +12,7 @@ DPO算法的解决的问题可以看示意图，就是把RLHF中参考reward mod
 </p>
 但是需要注意DPO方法仅适用于对齐人类偏好，如果是用于训练思维链这种能力，还是需要RL来做，因为DPO中没有规则来评价模型输出结果中是否带思维链的一些指标。
 
-DPO算法目标函数为：
+DPO算法损失函数为：
 <p align="center">
     <img src="./docs/dpo-loss_form.png">
 </p>
@@ -25,12 +25,35 @@ DPO的数学推导比较复杂，详细的证明和推导可以看以下两份�
 
     利用了建模人类偏好的Bradley-Terry模型数学形式上的一个trick，通过chosen和rejected之间的减法，能够消去奖励模型。带着消去奖励模型的最终目标去看公式推导，可以理清思路。
 
-2. 为什么损失函数要加一层log函数
+2. 损失函数的定义
 
     为什么不直接用Bradley-Terry转换后的sigmoid函数作为损失。Bradley-Terry模型给出的是偏好概率，即选择某个偏好大于另一个的概率，DPO的目标是最大化这个概率。即需要最大化大量样本概率的乘积，而乘积难以直接优化。取 log 能把乘法变成加法，让推导可计算、可优化，并且不会改变最大值的位置。所以最大似然推导必然得到 log-likelihood，而不是原始概率。
 
-### 公式与代码实现对应关系
-TODO(wangjintao): 公式与代码对应关系
+### 核心公式在代码中的实现
+从公示的描述来看，条件概率是指是输入序列x，输出序列为yw或yl的概率，因此实现上用的也是**序列似然概率**，这一点与PPO/GRPO等方法有差异。
+
+代码中的概率实现都是对数似然概率，因此除法都转换为了减法，下面的loss计算对应了DPO损失函数的数学公式：
+```python
+def dpo_loss(ref_probs, probs, beta):
+    def split_probs(probs):
+        # label中包含chosen和rejected, 因此生成部分的概率手动拆成chosen序列和rejected序列
+        len_chosen = int(len(probs) // 2)
+        chosen_data = probs[:len_chosen]
+        reject_data = probs[len_chosen:]
+        return torch.cat(chosen_data), torch.cat(reject_data)
+
+    # 分别计算ref_model和policy_model, chosen和rejected序列的对数似然概率
+    ref_chosen_probs, ref_reject_probs = split_probs(ref_probs)
+    chosen_probs, reject_probs = split_probs(probs)
+
+    # Bradley-Terry模型的核心公式, 因为都是对数似然概率, 除法转换成减法
+    # (chosen_probs - ref_chosen_probs) - (rejected_probs - ref_reject_probs)
+    pi_logratios = chosen_probs - reject_probs
+    ref_logratios = ref_chosen_probs - ref_reject_probs
+    logits = pi_logratios - ref_logratios
+    loss = -F.logsigmoid(beta*logits)
+    return loss.mean()
+```
 
 ## 📚 数据集
 数据集选用M-A-P团队的COIG-P，是一个百万级中文人工智能偏好训练数据集，数据列如下所示

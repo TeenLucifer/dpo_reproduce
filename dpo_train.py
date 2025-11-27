@@ -85,27 +85,32 @@ def logits_to_probs(logits, labels):
     # labels shape: (batch_size, seq_len)
     # probs shape: (batch_size, seq_len)
     log_probs = F.log_softmax(logits, dim=2)
-    probs = torch.gather(log_probs, dim=2, index=labels.unsqueeze(2)).squeeze(-1)
+    probs = torch.gather(log_probs, dim=2, index=labels.unsqueeze(2)).squeeze(-1) # 每个位置把对应token的概率从vocab_size中挑出来
     return probs
 
-def mask_logits(logits, labels):
-    # logits shape: (batch_size, seq_len, vocab_size)
-    # labels_masks shape: (batch_size, seq_len)
-    new_logits = []
-    for logit, label in zip(logits, labels):
-        new_logits.append(logit[label != 0].sum().unsqueeze(0))
+def mask_logits(log_probs, labels):
+    # log_probs shape: (2*batch_size, seq_len)
+    # labels_masks shape: (2*batch_size)
+    seq_probs = []
+    for log_prob, label in zip(log_probs, labels):
+        seq_probs.append(log_prob[label != 0].sum().unsqueeze(0))
 
-    return new_logits
+    return seq_probs
 
 def dpo_loss(ref_probs, probs, beta):
     def split_probs(probs):
+        # label中包含chosen和rejected, 因此生成部分的概率手动拆成chosen序列和rejected序列
         len_chosen = int(len(probs) // 2)
         chosen_data = probs[:len_chosen]
         reject_data = probs[len_chosen:]
         return torch.cat(chosen_data), torch.cat(reject_data)
 
+    # 分别计算ref_model和policy_model, chosen和rejected序列的对数似然概率
     ref_chosen_probs, ref_reject_probs = split_probs(ref_probs)
     chosen_probs, reject_probs = split_probs(probs)
+
+    # Bradley-Terry模型的核心公式, 因为都是对数似然概率, 除法转换成减法
+    # (chosen_probs - ref_chosen_probs) - (rejected_probs - ref_reject_probs)
     pi_logratios = chosen_probs - reject_probs
     ref_logratios = ref_chosen_probs - ref_reject_probs
     logits = pi_logratios - ref_logratios
@@ -116,14 +121,24 @@ class DPOTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         input_ids = inputs['input_ids']
         labels = inputs['labels']
+
+        # 计算ref_modell生成部分的概率
         with torch.no_grad():
-            ref_logits = ref_model(input_ids=input_ids, labels = labels).logits
-        ref_probs = logits_to_probs(ref_logits, labels)
-        ref_probs = mask_logits(ref_probs, labels)
-        logits = model(input_ids=input_ids, labels = labels).logits
-        probs = logits_to_probs(logits, labels)
-        probs = mask_logits(probs, labels)
-        loss = dpo_loss(ref_probs, probs, 0.1)
+            ref_logits = ref_model(input_ids=input_ids, labels=labels).logits
+        # 2*batch_size * seq_len * vacab_size -> 2*batch_size * seq_len
+        # 这一步是把原始的logits分数转换为取labels中各token的对数似然概率
+        ref_log_probs = logits_to_probs(ref_logits, labels)
+        # 2*batch_size * seq_len -> 2*batch_size
+        # 这一步是把prompt遮住, 并且计算生成序列的对数似然概率
+        ref_seq_probs = mask_logits(ref_log_probs, labels)
+
+        # 计算polilcy_model生成部分的概率, 同ref_model对数似然概率计算的过程
+        policy_logits = model(input_ids=input_ids, labels = labels).logits
+        policy_log_probs = logits_to_probs(policy_logits, labels)
+        policy_seq_probs = mask_logits(policy_log_probs, labels)
+
+        # 计算loss
+        loss = dpo_loss(ref_seq_probs, policy_seq_probs, 0.1)
         return loss
 
 if __name__ == "__main__":
