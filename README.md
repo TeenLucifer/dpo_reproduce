@@ -1,4 +1,4 @@
-# ppo_reproduce PPO算法复现
+# dpo_reproduce DPO算法复现
 
 本项目基于 Qwen2.5-0.5B 语言模型全流程复现DPO算法，loss函数设计+policy model训练。
 
